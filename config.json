@@ -1,0 +1,22 @@
+{
+  "interns": [
+    {
+      "name": "Daffa",
+      "branch": "2025-TEEP-11-Daffa",
+      "trello_card_id": "xQRGnefy",
+      "log_file_path": "Daily-Logs.md"
+    },
+    {
+      "name": "Rossi",
+      "branch": "2025-TEEP-5-Rossi",
+      "trello_card_id": "jHmy9P9H",
+      "log_file_path": "Daily-Logs.md"
+    },
+    {
+      "name": "Fata",
+      "branch": "2025-TEEP-1-Fata",
+      "trello_card_id": "8vdwa8YJ",
+      "log_file_path": "Daily-Logs.md"
+    }
+  ]
+}
