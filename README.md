@@ -110,6 +110,17 @@ Follow these steps to set up the service on a Windows Server or a local machine.
 
 ---
 
+## Testing / Manual run
+1. Open windows powershell and run as administrator.
+2. Navigate to the directory you have the script in.
+3. Type the following command:
+```powershell
+.\run_sync.ps1
+```
+4. Take a look at sync.log to see the logging.
+
+---
+
 ## 🖥️ Deployment
 
 To automate the script, create a task using Windows Task Scheduler.
