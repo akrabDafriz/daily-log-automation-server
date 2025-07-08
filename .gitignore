@@ -1,1 +1,4 @@
 .env
+sync.log
+sync_state.json
+config.json

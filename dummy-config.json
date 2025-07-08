@@ -1,0 +1,16 @@
+{
+  "interns": [
+    {
+        "name": "Bob",
+        "branch": "bob-branch",
+        "trello_card_id": "their_trello_card_id",
+        "log_file_path": "path/to/their/log.md"
+    },
+    {
+        "name": "Alice",
+        "branch": "alice-branch",
+        "trello_card_id": "their_trello_card_id",
+        "log_file_path": "path/to/their/log.md"
+    }
+  ]
+}

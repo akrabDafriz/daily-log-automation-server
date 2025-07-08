@@ -1,11 +1,12 @@
 #
-# GitHub to Trello Synchronization Service (V3 - Milestones & Daily Logs)
+# GitHub to Trello Synchronization Service (V7 - Handles Deletions & Log Rotation)
 #
 # Description:
 # This script provides a one-way sync from a GitHub Markdown file to a Trello card.
 # It reads a structured markdown file with two sections: "Milestones" and "Daily Logs".
-# - Milestones are synced to Trello checklists.
-# - All new Daily Log entries are synced to Trello comments, and existing comments are updated if the log changes.
+# - Milestones are synced to Trello checklists, including deleting tasks removed from GitHub.
+# - All Daily Log entries are synced to Trello comments in chronological order.
+# - Existing Trello comments are updated if the corresponding log in GitHub changes.
 #
 #
 
@@ -88,16 +89,14 @@ def parse_markdown(content):
         elif current_section == "daily_logs":
             date_match = re.match(r"###\s*(\d{4}-\d{2}-\d{2})", stripped_line)
             if date_match:
-                # Find the full text for this daily log entry
                 date_str = date_match.group(1)
-                # A simple way to get the block is to split by '---'
                 full_log_block = content.split(stripped_line)[1].split('---')[0].strip()
                 data["daily_logs"][date_str] = f"### {date_str}\n{full_log_block}"
 
     return data
 
 # --- Trello Functions ---
-def get_trello_card_data(card_id, fields="all"):
+def get_trello_card_data(card_id):
     """Gets all data for a card, including checklists and comments."""
     print(f"Fetching all data for Trello card {card_id[:5]}...")
     url = f"{TRELLO_API_BASE_URL}/cards/{card_id}"
@@ -111,10 +110,13 @@ def get_trello_card_data(card_id, fields="all"):
         return None
 
 def sync_milestones(card_id, card_data, milestones_from_github, state):
-    """Syncs milestones from GitHub to Trello checklists."""
+    """Syncs milestones from GitHub to Trello checklists, including deletions."""
     print("--- Syncing Milestones to Checklists ---")
     card_state = state.setdefault(card_id, {"checklists": {}})
     existing_checklists = {cl['name']: cl for cl in card_data.get('checklists', [])}
+    
+    # Create a set of task names from GitHub for efficient lookup
+    github_task_names_by_milestone = {m_name: {t['name'] for t in tasks} for m_name, tasks in milestones_from_github.items()}
 
     for milestone_name, tasks_from_github in milestones_from_github.items():
         checklist = None
@@ -129,79 +131,96 @@ def sync_milestones(card_id, card_data, milestones_from_github, state):
                 response = requests.post(url, params=params)
                 response.raise_for_status()
                 checklist = response.json()
-                existing_checklists[milestone_name] = checklist # Add to our local copy
+                existing_checklists[milestone_name] = checklist
             except requests.exceptions.RequestException as e:
-                print(f"Error creating checklist: {e}")
+                print(f"!! ERROR creating checklist '{milestone_name}': {e}")
                 continue
         
         if not checklist: continue
 
-        # Sync items within the checklist
         existing_items = {item['name']: item for item in checklist.get('checkItems', [])}
+        
+        # Create/Update loop
         for task in tasks_from_github:
             task_name = task['name']
             task_checked = task['checked']
             state_str = 'complete' if task_checked else 'incomplete'
 
-            if task_name not in existing_items:
-                print(f" -> Creating new task: '{task_name}'")
-                url = f"{TRELLO_API_BASE_URL}/checklists/{checklist['id']}/checkItems"
-                params = {'key': TRELLO_API_KEY, 'token': TRELLO_API_TOKEN, 'name': task_name, 'checked': task_checked}
-                requests.post(url, params=params)
-            else:
-                # Check if state needs updating
-                item = existing_items[task_name]
-                if item['state'] != state_str:
-                    print(f" -> Updating task state for: '{task_name}' to {state_str}")
-                    url = f"{TRELLO_API_BASE_URL}/cards/{card_id}/checkItem/{item['id']}"
-                    params = {'key': TRELLO_API_KEY, 'token': TRELLO_API_TOKEN, 'state': state_str}
-                    requests.put(url, params=params)
+            try:
+                if task_name not in existing_items:
+                    print(f" -> Creating new task: '{task_name}'")
+                    url = f"{TRELLO_API_BASE_URL}/checklists/{checklist['id']}/checkItems"
+                    checked_str = str(task_checked).lower()
+                    params = {'key': TRELLO_API_KEY, 'token': TRELLO_API_TOKEN, 'name': task_name, 'checked': checked_str}
+                    response = requests.post(url, params=params)
+                    response.raise_for_status()
+                else:
+                    item = existing_items[task_name]
+                    if item['state'] != state_str:
+                        print(f" -> Updating task state for: '{task_name}' to {state_str}")
+                        url = f"{TRELLO_API_BASE_URL}/cards/{card_id}/checkItem/{item['id']}"
+                        params = {'key': TRELLO_API_KEY, 'token': TRELLO_API_TOKEN, 'state': state_str}
+                        response = requests.put(url, params=params)
+                        response.raise_for_status()
+            except requests.exceptions.RequestException as e:
+                print(f"!! ERROR syncing task '{task_name}': {e}")
+                if 'response' in locals() and response is not None:
+                    print(f"   Trello's response: {response.text}")
+        
+        # ** NEW ** Deletion loop
+        github_task_names = github_task_names_by_milestone.get(milestone_name, set())
+        for item_name, item_data in existing_items.items():
+            if item_name not in github_task_names:
+                print(f" -> Deleting task not found in GitHub: '{item_name}'")
+                try:
+                    url = f"{TRELLO_API_BASE_URL}/checklists/{checklist['id']}/checkItems/{item_data['id']}"
+                    params = {'key': TRELLO_API_KEY, 'token': TRELLO_API_TOKEN}
+                    response = requests.delete(url, params=params)
+                    response.raise_for_status()
+                except requests.exceptions.RequestException as e:
+                    print(f"!! ERROR deleting task '{item_name}': {e}")
+
 
 def sync_daily_log(card_id, card_data, daily_logs_from_github):
-    """Syncs all daily logs from GitHub to Trello, updating existing comments if they differ."""
+    """Syncs all daily logs from GitHub to Trello, creating or updating comments as needed."""
     print("\n--- Syncing Daily Logs to Comments ---")
     
     existing_comments = card_data.get('actions', [])
     
-    # Create a dictionary mapping the date header to the comment's ID and full text.
     posted_logs = {}
     for comment in existing_comments:
         text = comment['data']['text'].strip()
-        if text.startswith("###"):
-            header = text.split('\n')[0]
-            posted_logs[header] = {"id": comment['id'], "text": text}
+        date_match = re.search(r"###\s*(\d{4}-\d{2}-\d{2})", text)
+        if date_match:
+            date_str = date_match.group(1)
+            posted_logs[date_str] = {"id": comment['id'], "text": text}
 
-    # Loop through all logs found in the markdown file
-    for date_str, log_content_from_github in daily_logs_from_github.items():
-        date_header = f"### {date_str}"
+    sorted_logs = sorted(daily_logs_from_github.items())
+
+    for date_str, log_content_from_github in sorted_logs:
         log_content_from_github = log_content_from_github.strip()
 
-        # Check if a log for this date has already been posted
-        if date_header in posted_logs:
-            existing_comment_id = posted_logs[date_header]["id"]
-            existing_comment_text = posted_logs[date_header]["text"]
+        if date_str in posted_logs:
+            existing_comment_id = posted_logs[date_str]["id"]
+            existing_comment_text = posted_logs[date_str]["text"]
 
-            # Compare the content from GitHub with the existing Trello comment
             if log_content_from_github != existing_comment_text:
-                # Content has changed, so update the comment
                 print(f"Log for {date_str} has changed. Updating comment...")
                 url = f"{TRELLO_API_BASE_URL}/actions/{existing_comment_id}"
                 params = {'key': TRELLO_API_KEY, 'token': TRELLO_API_TOKEN, 'text': log_content_from_github}
                 try:
-                    requests.put(url, params=params)
+                    requests.put(url, params=params).raise_for_status()
                     print("-> Successfully updated comment.")
                 except requests.exceptions.RequestException as e:
                     print(f"Error updating comment for {date_str}: {e}")
             else:
-                # Content is the same, do nothing
                 print(f"Log for {date_str} is already up to date. Skipping.")
         else:
-            # If not posted, post it as a new comment
             print(f"Posting new comment for {date_str}...")
             url = f"{TRELLO_API_BASE_URL}/cards/{card_id}/actions/comments"
             params = {'key': TRELLO_API_KEY, 'token': TRELLO_API_TOKEN, 'text': log_content_from_github}
             try:
-                requests.post(url, params=params)
+                requests.post(url, params=params).raise_for_status()
                 print("-> Successfully posted comment.")
             except requests.exceptions.RequestException as e:
                 print(f"Error posting comment for {date_str}: {e}")
@@ -253,7 +272,6 @@ def main():
             print(f"Could not fetch Trello card data for {intern_name}. Skipping.")
             continue
             
-        # Run both sync functions
         sync_milestones(card_id, card_data, parsed_data["milestones"], state)
         sync_daily_log(card_id, card_data, parsed_data["daily_logs"])
 
